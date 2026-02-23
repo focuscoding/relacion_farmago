@@ -47,7 +47,6 @@ class OdooClient:
 # -----------------------------
 
 def procesar_facturas(data):
-
     if not data:
         return pd.DataFrame()
 
@@ -68,15 +67,27 @@ def procesar_facturas(data):
     # Total Gravado = Impuesto / 16%
     df["Total Gravado"] = df["Impuesto"] / 0.16
 
-    # Total = Exento + Total Gravado + 25% del impuesto
+    # Exento
     df["Exento"] = df["iva_exempt"].fillna(0)
 
-    df["Total"] = (
-        df["Exento"]
-        + df["Total Gravado"]
-        + (df["Impuesto"] * 0.25)
-    )
+    # Total normal
+    df["Total"] = df["Exento"] + df["Total Gravado"] + (df["Impuesto"] * 0.25)
 
+    # -------------------------
+    # Aplicar regla especial para archivos "RNCVTA"
+    # -------------------------
+    mask_rnc = df["name"].str.contains("RNCVTA", case=False, na=False)
+
+    df.loc[mask_rnc, "Exento"] = -df.loc[mask_rnc, "Exento"]
+    df.loc[mask_rnc, "Total Gravado"] = -df.loc[mask_rnc, "Total Gravado"]
+    df.loc[mask_rnc, "Impuesto"] = -df.loc[mask_rnc, "Impuesto"]
+
+    # Total especial: usar -amount_total
+    df.loc[mask_rnc, "Total"] = -df.loc[mask_rnc, "amount_total"]
+
+    # -------------------------
+    # Construir dataframe final
+    # -------------------------
     df_final = pd.DataFrame({
         "Empresa": "BLV",
         "Número": df["name"],
@@ -92,10 +103,75 @@ def procesar_facturas(data):
 
     return df_final
 
-def generar_excel(df):
+def generar_excel_formateado(df):
+    """
+    Genera Excel con formato:
+    - Encabezados sin bordes
+    - Moneda: Dólares ($) o Bolívares (Bs.) según columna 'Moneda'
+    - Columnas F-J: formato monetario
+    - Ajuste automático de ancho de columnas
+    """
+
     output = io.BytesIO()
-    with pd.ExcelWriter(output) as writer:
-        df.to_excel(writer, index=False, sheet_name='Reporte')
+
+    # Crear ExcelWriter con xlsxwriter
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Reporte")
+
+        workbook  = writer.book
+        worksheet = writer.sheets["Reporte"]
+
+        # -----------------------------
+        # Formatos
+        # -----------------------------
+        header_format = workbook.add_format({
+            "bold": True,
+            "border": 0,   # Sin bordes
+            "align": "center",
+            "valign": "vcenter",
+        })
+
+        dollar_format = workbook.add_format({
+            "num_format": "$#,##0.00"
+        })
+
+        bs_format = workbook.add_format({
+            "num_format": '"Bs." #,##0.00'
+        })
+
+        # -----------------------------
+        # Formatear encabezados
+        # -----------------------------
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+
+        # -----------------------------
+        # Formatear filas según moneda
+        # -----------------------------
+        for row_num, moneda in enumerate(df["Moneda"], start=1):
+            fmt = dollar_format if str(moneda).lower() == "dolares" else bs_format
+            # Columnas F-I → índice 5 a 8
+            for col in range(5, 9):
+                val = df.iloc[row_num-1, col]
+                try:
+                    val_num = float(val) if pd.notna(val) else 0
+                except:
+                    val_num = 0
+                worksheet.write_number(row_num, col, val_num, fmt)
+
+            # Columna J (Moneda) → escribir como texto, sin formato
+            worksheet.write(row_num, 9, df.iloc[row_num-1, 9])
+        # -----------------------------
+        # Ajustar ancho columnas
+        # -----------------------------
+        for i, col in enumerate(df.columns):
+            # Calcular ancho basado en el valor más largo de la columna
+            max_len = max(
+                df[col].astype(str).map(len).max(),
+                len(col)
+            )
+            worksheet.set_column(i, i, max_len + 2)  # +2 margen
+
     return output.getvalue()
 
 # -----------------------------
@@ -109,6 +185,8 @@ with col1:
 
 with col2:
     fecha_fin = st.date_input("Fecha fin", date.today(), format="DD/MM/YYYY")
+
+
 
 if st.button("🔍 Consultar Facturas"):
 
@@ -138,7 +216,8 @@ if st.button("🔍 Consultar Facturas"):
             'iva_exempt',
             'amount_tax_usd',
             'amount_tax_bs',
-            'currency_id'
+            'currency_id',
+            'amount_total'
         ]
 
         with st.spinner("Consultando Odoo..."):
@@ -149,7 +228,6 @@ if st.button("🔍 Consultar Facturas"):
         if df_final.empty:
             st.warning("No se encontraron registros.")
         else:
-
             st.success(f"Se encontraron {len(df_final)} registros.")
 
             st.subheader("📄 Previsualización")
@@ -158,20 +236,27 @@ if st.button("🔍 Consultar Facturas"):
             # Métricas resumen
             st.subheader("📈 Resumen")
             colA, colB, colC = st.columns(3)
-
             colA.metric("Total Facturas", len(df_final))
             colB.metric("Total Impuesto", round(df_final["Impuesto"].sum(), 2))
             colC.metric("Total General", round(df_final["Total"].sum(), 2))
 
-            excel_file = generar_excel(df_final)
+            # -------- Generar Excel --------
+            with st.spinner("Generando Excel..."):
+                excel_file = generar_excel_formateado(df_final)
 
+            # -------- Variables para título --------
+            fecha_inicio_str = fecha_inicio.strftime("%d-%m-%Y")
+            fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
+            nombre_archivo = f"Relación Farmago del {fecha_inicio_str} al {fecha_fin_str}.xlsx"
+
+            # -------- Botón de descarga --------
             st.download_button(
                 label="⬇️ Descargar Excel",
                 data=excel_file,
-                file_name="reporte_facturas_bd1.xlsx",
+                file_name=nombre_archivo,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
-        st.error(f"Ocurrió un error: {str(e)}")
+        st.error(f"Ocurrió un error: {e}")
 
