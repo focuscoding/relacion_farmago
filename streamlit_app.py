@@ -3,20 +3,18 @@ import xmlrpc.client
 import pandas as pd
 import io
 from datetime import date
+import unicodedata
 
 # -----------------------------
 # CONFIGURACIÓN GENERAL
 # -----------------------------
-
-st.set_page_config(page_title="Reporte Facturas BD1", layout="wide")
+st.set_page_config(page_title="Reporte Facturas", layout="wide")
 st.title("📊 Reporte de Facturas")
 
 # -----------------------------
 # CLASE CONEXIÓN ODOO
 # -----------------------------
-
 class OdooClient:
-
     def __init__(self, url, db, username, password):
         self.url = url
         self.db = db
@@ -43,19 +41,15 @@ class OdooClient:
         )
 
 # -----------------------------
-# FUNCIONES DE PROCESAMIENTO
+# FUNCIONES AUXILIARES
 # -----------------------------
-
 def procesar_facturas(data):
     if not data:
         return pd.DataFrame()
 
     df = pd.DataFrame(data)
-
-    # Extraer nombre moneda
     df["Moneda"] = df["currency_id"].apply(lambda x: x[1] if x else "")
 
-    # Obtener impuesto según moneda
     def obtener_impuesto(row):
         if row["Moneda"] == "Dolares":
             return row.get("amount_tax_usd", 0) or 0
@@ -63,31 +57,16 @@ def procesar_facturas(data):
             return row.get("amount_tax_bs", 0) or 0
 
     df["Impuesto"] = df.apply(obtener_impuesto, axis=1)
-
-    # Total Gravado = Impuesto / 16%
     df["Total Gravado"] = df["Impuesto"] / 0.16
-
-    # Exento
     df["Exento"] = df["iva_exempt"].fillna(0)
-
-    # Total normal
     df["Total"] = df["Exento"] + df["Total Gravado"] + (df["Impuesto"] * 0.25)
 
-    # -------------------------
-    # Aplicar regla especial para archivos "RNCVTA"
-    # -------------------------
     mask_rnc = df["name"].str.contains("RNCVTA", case=False, na=False)
-
     df.loc[mask_rnc, "Exento"] = -df.loc[mask_rnc, "Exento"]
     df.loc[mask_rnc, "Total Gravado"] = -df.loc[mask_rnc, "Total Gravado"]
     df.loc[mask_rnc, "Impuesto"] = -df.loc[mask_rnc, "Impuesto"]
-
-    # Total especial: usar -amount_total
     df.loc[mask_rnc, "Total"] = -df.loc[mask_rnc, "amount_total"]
 
-    # -------------------------
-    # Construir dataframe final
-    # -------------------------
     df_final = pd.DataFrame({
         "Empresa": "BLV",
         "Número": df["name"],
@@ -104,53 +83,27 @@ def procesar_facturas(data):
     return df_final
 
 def generar_excel_formateado(df):
-    """
-    Genera Excel con formato:
-    - Encabezados sin bordes
-    - Moneda: Dólares ($) o Bolívares (Bs.) según columna 'Moneda'
-    - Columnas F-J: formato monetario
-    - Ajuste automático de ancho de columnas
-    """
-
     output = io.BytesIO()
-
-    # Crear ExcelWriter con xlsxwriter
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Reporte")
-
         workbook  = writer.book
         worksheet = writer.sheets["Reporte"]
 
-        # -----------------------------
-        # Formatos
-        # -----------------------------
         header_format = workbook.add_format({
             "bold": True,
-            "border": 0,   # Sin bordes
+            "border": 0,
             "align": "center",
             "valign": "vcenter",
         })
 
-        dollar_format = workbook.add_format({
-            "num_format": "$#,##0.00"
-        })
+        dollar_format = workbook.add_format({"num_format": "$#,##0.00"})
+        bs_format = workbook.add_format({"num_format": '"Bs." #,##0.00'})
 
-        bs_format = workbook.add_format({
-            "num_format": '"Bs." #,##0.00'
-        })
-
-        # -----------------------------
-        # Formatear encabezados
-        # -----------------------------
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
 
-        # -----------------------------
-        # Formatear filas según moneda
-        # -----------------------------
         for row_num, moneda in enumerate(df["Moneda"], start=1):
             fmt = dollar_format if str(moneda).lower() == "dolares" else bs_format
-            # Columnas F-I → índice 5 a 8
             for col in range(5, 9):
                 val = df.iloc[row_num-1, col]
                 try:
@@ -158,47 +111,45 @@ def generar_excel_formateado(df):
                 except:
                     val_num = 0
                 worksheet.write_number(row_num, col, val_num, fmt)
-
-            # Columna J (Moneda) → escribir como texto, sin formato
             worksheet.write(row_num, 9, df.iloc[row_num-1, 9])
-        # -----------------------------
-        # Ajustar ancho columnas
-        # -----------------------------
+
         for i, col in enumerate(df.columns):
-            # Calcular ancho basado en el valor más largo de la columna
-            max_len = max(
-                df[col].astype(str).map(len).max(),
-                len(col)
-            )
-            worksheet.set_column(i, i, max_len + 2)  # +2 margen
+            max_len = max(df[col].astype(str).map(len).max(), len(col))
+            worksheet.set_column(i, i, max_len + 2)
 
     return output.getvalue()
+
+def limpiar_nombre(nombre):
+    nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('ASCII')
+    nombre = nombre.replace(" ", "_")
+    return nombre
 
 # -----------------------------
 # INTERFAZ
 # -----------------------------
-
 col1, col2 = st.columns(2)
-
 with col1:
     fecha_inicio = st.date_input("Fecha inicio", date.today(), format="DD/MM/YYYY")
-
 with col2:
     fecha_fin = st.date_input("Fecha fin", date.today(), format="DD/MM/YYYY")
 
+# -----------------------------
+# Inicializar session_state
+# -----------------------------
+if "df_final" not in st.session_state:
+    st.session_state.df_final = None
+if "excel_file" not in st.session_state:
+    st.session_state.excel_file = None
+if "nombre_archivo" not in st.session_state:
+    st.session_state.nombre_archivo = None
 
-
+# -----------------------------
+# Botón Consultar Facturas
+# -----------------------------
 if st.button("🔍 Consultar Facturas"):
-
     try:
         config = st.secrets["odoo_bd1"]
-
-        client = OdooClient(
-            config["url"],
-            config["db"],
-            config["username"],
-            config["password"]
-        )
+        client = OdooClient(config["url"], config["db"], config["username"], config["password"])
 
         domain = [
             ('move_type', 'in', ['out_invoice', 'out_refund']),
@@ -209,54 +160,44 @@ if st.button("🔍 Consultar Facturas"):
         ]
 
         fields = [
-            'name',
-            'invoice_date',
-            'invoice_number_next',
-            'partner_id',
-            'iva_exempt',
-            'amount_tax_usd',
-            'amount_tax_bs',
-            'currency_id',
-            'amount_total'
+            'name','invoice_date','invoice_number_next','partner_id',
+            'iva_exempt','amount_tax_usd','amount_tax_bs','currency_id','amount_total'
         ]
 
         with st.spinner("Consultando Odoo..."):
             data = client.search_read('account.move', domain, fields)
 
-        df_final = procesar_facturas(data)
-
-        if df_final.empty:
-            st.warning("No se encontraron registros.")
-        else:
-            st.success(f"Se encontraron {len(df_final)} registros.")
-
-            st.subheader("📄 Previsualización")
-            st.dataframe(df_final, width="stretch")
-
-            # Métricas resumen
-            st.subheader("📈 Resumen")
-            colA, colB, colC = st.columns(3)
-            colA.metric("Total Facturas", len(df_final))
-            colB.metric("Total Impuesto", round(df_final["Impuesto"].sum(), 2))
-            colC.metric("Total General", round(df_final["Total"].sum(), 2))
-
-            # -------- Generar Excel --------
-            with st.spinner("Generando Excel..."):
-                excel_file = generar_excel_formateado(df_final)
-
-            # -------- Variables para título --------
-            fecha_inicio_str = fecha_inicio.strftime("%d-%m-%Y")
-            fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
-            nombre_archivo = f"Relación Farmago del {fecha_inicio_str} al {fecha_fin_str}.xlsx"
-
-            # -------- Botón de descarga --------
-            st.download_button(
-                label="⬇️ Descargar Excel",
-                data=excel_file,
-                file_name=nombre_archivo,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        st.session_state.df_final = procesar_facturas(data)
+        if not st.session_state.df_final.empty:
+            excel_bytesio = io.BytesIO()
+            excel_bytesio.write(generar_excel_formateado(st.session_state.df_final))
+            excel_bytesio.seek(0)
+            st.session_state.excel_file = excel_bytesio
+            nombre_archivo = f"Relación Farmago del {fecha_inicio.strftime('%d-%m-%Y')} al {fecha_fin.strftime('%d-%m-%Y')}.xlsx"
+            st.session_state.nombre_archivo = limpiar_nombre(nombre_archivo)
 
     except Exception as e:
-        st.error(f"Ocurrió un error: {e}")
+        st.error(f"Ocurrió un error: {str(e)}")
 
+# -----------------------------
+# Mostrar resultados y descarga
+# -----------------------------
+if st.session_state.df_final is not None and not st.session_state.df_final.empty:
+    df_final = st.session_state.df_final
+
+    st.success(f"Se encontraron {len(df_final)} registros.")
+    st.subheader("📄 Previsualización")
+    st.dataframe(df_final, width="stretch")
+    st.subheader("📈 Resumen")
+    colA, colB, colC = st.columns(3)
+    colA.metric("Total Facturas", len(df_final))
+    colB.metric("Total Impuesto", round(df_final["Impuesto"].sum(), 2))
+    colC.metric("Total General", round(df_final["Total"].sum(), 2))
+
+    st.download_button(
+        label="⬇️ Descargar Excel",
+        data=st.session_state.excel_file,
+        file_name=st.session_state.nombre_archivo,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_excel"
+    )
