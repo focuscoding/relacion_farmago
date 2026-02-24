@@ -167,7 +167,79 @@ if st.button("🔍 Consultar Facturas"):
         with st.spinner("Consultando Odoo..."):
             data = client.search_read('account.move', domain, fields)
 
+        # -----------------------------
+        # CONEXIÓN BD2
+        # -----------------------------
+        config2 = st.secrets["odoo_bd2"]
+        client2 = OdooClient(config2["url"], config2["db"], config2["username"], config2["password"])
+
+        domain_bd2 = [
+            ('move_type', 'in', ['out_invoice', 'out_refund']),
+            ('invoice_partner_display_name', '=', 'FARMACIA FARMAGO, C.A.'),
+            ('invoice_date', '>=', str(fecha_inicio)),
+            ('invoice_date', '<=', str(fecha_fin)),
+            ('state', '=', 'posted')
+        ]
+
+        fields_bd2 = [
+            'name',
+            'invoice_date',
+            'invoice_number_next',
+            'partner_id',
+            'amount_exento',
+            'amount_untaxed_signed',
+            'amount_tax_signed',
+            'amount_total_signed',
+            'currency_id',
+            'tasa'
+        ]
+
+        data_bd2 = client2.search_read('account.move', domain_bd2, fields_bd2)
+
+
+
         st.session_state.df_final = procesar_facturas(data)
+
+        # -----------------------------
+        # PROCESAR BD2
+        # -----------------------------
+        if data_bd2:
+            df_bd2 = pd.DataFrame(data_bd2)
+
+            df_bd2["Moneda"] = df_bd2["currency_id"].apply(lambda x: x[1] if x else "")
+
+            # Usar el campo 'tasa' si existe, si no asumimos 1
+            if "tasa" in df_bd2.columns:
+                tasa = df_bd2["tasa"].replace(0, 1)  # evitar dividir entre 0
+            else:
+                tasa = pd.Series([1]*len(df_bd2))
+
+            exento = df_bd2["amount_exento"] / tasa
+            total_gravado = df_bd2["amount_untaxed_signed"] / tasa
+            impuesto = df_bd2["amount_tax_signed"] / tasa
+
+            df_bd2_final = pd.DataFrame({
+                "Empresa": "CRLV",
+                "Número": df_bd2["name"],
+                "Fecha": df_bd2["invoice_date"],
+                "Nro. Factura": df_bd2["invoice_number_next"],
+                "Cliente": df_bd2["partner_id"].apply(lambda x: x[1] if x else ""),
+                "Exento": exento,
+                "Total Gravado": total_gravado,
+                "Impuesto": impuesto,
+                "Total": exento + total_gravado + (impuesto * 0.25),
+                "Moneda": "Dolares"
+            })
+
+            # Concatenar con BD1
+            st.session_state.df_final = pd.concat(
+                [st.session_state.df_final, df_bd2_final],
+                ignore_index=True
+            )
+
+
+
+
         if not st.session_state.df_final.empty:
             excel_bytesio = io.BytesIO()
             excel_bytesio.write(generar_excel_formateado(st.session_state.df_final))
