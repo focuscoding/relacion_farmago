@@ -9,7 +9,7 @@ import unicodedata
 # CONFIGURACIÓN GENERAL
 # -----------------------------
 st.set_page_config(page_title="Reporte Facturas", layout="wide")
-st.title("📊 Reporte de Facturas")
+st.title("📊Facturación Farmago")
 
 # -----------------------------
 # CLASE CONEXIÓN ODOO
@@ -183,16 +183,59 @@ if st.button("🔍 Consultar Facturas"):
 # Mostrar resultados y descarga
 # -----------------------------
 if st.session_state.df_final is not None and not st.session_state.df_final.empty:
+    # Aseguramos df_final
     df_final = st.session_state.df_final
 
     st.success(f"Se encontraron {len(df_final)} registros.")
+    
     st.subheader("📄 Previsualización")
     st.dataframe(df_final, width="stretch")
+
     st.subheader("📈 Resumen")
     colA, colB, colC = st.columns(3)
     colA.metric("Total Facturas", len(df_final))
     colB.metric("Total Impuesto", round(df_final["Impuesto"].sum(), 2))
     colC.metric("Total General", round(df_final["Total"].sum(), 2))
+
+    # -----------------------------
+    # FILTROS EXCLUSIONES
+    # -----------------------------
+    colA, colB = st.columns(2)
+
+    with colA:
+        excluir_nd = st.checkbox("Excluir todas las ND?", value=False)
+
+    with colB:
+        exclusiones_input = st.text_input(
+            "Excluir ND específicas (separadas por coma)",
+            value="",
+            disabled=excluir_nd
+        )
+
+    # Preprocesar exclusiones específicas
+    exclusiones_list = [x.strip() for x in exclusiones_input.split(",") if x.strip()]
+
+    # -----------------------------
+    # Aplicar filtros según checkbox/input
+    # -----------------------------
+    df_filtrado = df_final.copy()
+
+    if excluir_nd:
+        # Excluir todas las filas cuyo 'name' contiene 'ND'
+        df_filtrado = df_filtrado[~df_filtrado["Número"].str.contains("ND", case=False, na=False)]
+    elif exclusiones_list:
+        # Excluir filas donde 'name' contiene 'ND' y 'Nro. Factura' contiene alguno de los valores
+        mask_excluir = df_filtrado["Número"].str.contains("ND", case=False, na=False) & \
+                       df_filtrado["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in exclusiones_list))
+        df_filtrado = df_filtrado[~mask_excluir]
+
+    # -----------------------------
+    # Generar Excel
+    # -----------------------------
+    excel_bytesio = io.BytesIO()
+    excel_bytesio.write(generar_excel_formateado(df_filtrado))
+    excel_bytesio.seek(0)
+    st.session_state.excel_file = excel_bytesio
 
     st.download_button(
         label="⬇️ Descargar Excel",
