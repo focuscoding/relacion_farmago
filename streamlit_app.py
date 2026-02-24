@@ -2,7 +2,7 @@ import streamlit as st
 import xmlrpc.client
 import pandas as pd
 import io
-from datetime import date
+from datetime import date, timedelta
 import unicodedata
 
 # -----------------------------
@@ -129,9 +129,9 @@ def limpiar_nombre(nombre):
 # -----------------------------
 col1, col2 = st.columns(2)
 with col1:
-    fecha_inicio = st.date_input("Fecha inicio", date.today(), format="DD/MM/YYYY")
+    fecha_inicio = st.date_input("Fecha inicio", date.today() - timedelta(days=7), format="DD/MM/YYYY")
 with col2:
-    fecha_fin = st.date_input("Fecha fin", date.today(), format="DD/MM/YYYY")
+    fecha_fin = st.date_input("Fecha fin", date.today() - timedelta(days=3), format="DD/MM/YYYY")
 
 # -----------------------------
 # Inicializar session_state
@@ -217,6 +217,7 @@ if st.button("🔍 Consultar Facturas"):
             exento = df_bd2["amount_exento"] / tasa
             total_gravado = df_bd2["amount_untaxed_signed"] / tasa
             impuesto = df_bd2["amount_tax_signed"] / tasa
+            total_calculado = exento + total_gravado + (impuesto * 0.25)
 
             df_bd2_final = pd.DataFrame({
                 "Empresa": "CRLV",
@@ -227,9 +228,22 @@ if st.button("🔍 Consultar Facturas"):
                 "Exento": exento,
                 "Total Gravado": total_gravado,
                 "Impuesto": impuesto,
-                "Total": exento + total_gravado + (impuesto * 0.25),
+                "Total": total_calculado,
                 "Moneda": "Dolares"
             })
+
+            # -----------------------------
+            # Ajuste especial para NC (usar amount_total_signed)
+            # -----------------------------
+            mask_nc = df_bd2["name"].str.contains("NC", case=False, na=False)
+
+            df_bd2_final.loc[mask_nc, "Total"] = df_bd2.loc[mask_nc, "amount_total_signed"] / tasa[mask_nc]
+
+            # -----------------------------
+            # Redondear valores a 2 decimales
+            # -----------------------------
+            df_bd2_final[["Exento", "Total Gravado", "Impuesto", "Total"]] = \
+            df_bd2_final[["Exento", "Total Gravado", "Impuesto", "Total"]].round(2)
 
             # Concatenar con BD1
             st.session_state.df_final = pd.concat(
@@ -270,25 +284,35 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
     colC.metric("Total General", round(df_final["Total"].sum(), 2))
 
     # -----------------------------
-    # FILTROS EXCLUSIONES
+    # FILTROS EXCLUSIONES ND
     # -----------------------------
-    colA, colB = st.columns(2)
+    colA, colB, colC = st.columns(3)
 
     with colA:
         excluir_nd = st.checkbox("Excluir todas las ND?", value=False)
 
     with colB:
         exclusiones_input = st.text_input(
-            "Excluir ND específicas (separadas por coma)",
+            "Excluir ND específicas (Nro. Factura, separadas por coma)",
             value="",
             disabled=excluir_nd
         )
 
-    # Preprocesar exclusiones específicas
-    exclusiones_list = [x.strip() for x in exclusiones_input.split(",") if x.strip()]
+    # with colC:
+    #     frases_nd_input = st.text_input(
+    #         "Excluir ND por frases (separadas por coma)",
+    #         value="",
+    #         disabled=excluir_nd or bool(exclusiones_input)
+    #     )
 
     # -----------------------------
-    # Aplicar filtros según checkbox/input
+    # Convertir inputs a listas
+    # -----------------------------
+    exclusiones_list = [x.strip() for x in exclusiones_input.split(",") if x.strip()]
+    # frases_nd_list = [x.strip() for x in frases_nd_input.split(",") if x.strip()]
+
+    # -----------------------------
+    # Aplicar filtros
     # -----------------------------
     df_filtrado = df_final.copy()
 
@@ -298,8 +322,13 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
     elif exclusiones_list:
         # Excluir filas donde 'name' contiene 'ND' y 'Nro. Factura' contiene alguno de los valores
         mask_excluir = df_filtrado["Número"].str.contains("ND", case=False, na=False) & \
-                       df_filtrado["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in exclusiones_list))
+                    df_filtrado["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in exclusiones_list))
         df_filtrado = df_filtrado[~mask_excluir]
+    # elif frases_nd_list:
+    #     # Excluir filas donde 'name' contiene 'ND' y además contiene alguna de las frases
+    #     mask_frases = df_filtrado["Número"].str.contains("ND", case=False, na=False) & \
+    #                 df_filtrado["Número"].astype(str).apply(lambda x: any(frase.lower() in x.lower() for frase in frases_nd_list))
+    #     df_filtrado = df_filtrado[~mask_frases]
 
     # -----------------------------
     # Generar Excel
