@@ -4,6 +4,7 @@ import pandas as pd
 import io
 from datetime import date, timedelta
 import unicodedata
+import urllib.parse
 
 # -----------------------------
 # CONFIGURACIÓN GENERAL
@@ -82,7 +83,30 @@ def procesar_facturas(data):
 
     return df_final
 
+def calcular_resumen(df):
+
+    
+
+    resumen = (
+        df.groupby(["Empresa", "Moneda"])["Total"]
+        .sum()
+        .round(2)
+        .reset_index()
+    )
+
+    resumen_dict = {}
+
+    for _, row in resumen.iterrows():
+        empresa = row["Empresa"]
+        moneda = row["Moneda"]
+        total = row["Total"]
+
+        resumen_dict[(empresa, moneda)] = total
+
+    return resumen_dict
+
 def generar_excel_formateado(df):
+    resumen = calcular_resumen(df)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Reporte")
@@ -114,9 +138,41 @@ def generar_excel_formateado(df):
             worksheet.write(row_num, 9, df.iloc[row_num-1, 9])
 
         for i, col in enumerate(df.columns):
-            max_len = max(df[col].astype(str).map(len).max(), len(col))
-            worksheet.set_column(i, i, max_len + 2)
 
+            # convertir todo a string evitando NaN
+            column_data = df[col].astype(str).fillna("")
+
+            # calcular longitud máxima entre header y valores
+            max_len = max(
+                column_data.map(len).max(),
+                len(str(col))
+            )
+
+            # pequeño padding visual
+            adjusted_width = max_len + 3
+
+            worksheet.set_column(i, i, adjusted_width)
+
+        # -----------------------------
+        # RESUMEN EN EXCEL
+        # -----------------------------
+
+        bold_format = workbook.add_format({"bold": True})
+
+        worksheet.write("L1", "BLV", bold_format)
+        worksheet.write("L2", "Bolívares")
+        worksheet.write("L3", "Dolares")
+
+        worksheet.write("L4", "CRLV", bold_format)
+        worksheet.write("L5", "Dolares")
+
+        worksheet.write("M1", "Monto", bold_format)
+        worksheet.write_number("M2", resumen.get(("BLV", "Bolívares"), 0), bs_format)
+        worksheet.write_number("M3", resumen.get(("BLV", "Dolares"), 0), dollar_format)
+        worksheet.write_number("M5", resumen.get(("CRLV", "Dolares"), 0), dollar_format)    
+
+        worksheet.set_column("L:L", 12)
+        worksheet.set_column("M:M", 18)
     return output.getvalue()
 
 def limpiar_nombre(nombre):
@@ -124,15 +180,67 @@ def limpiar_nombre(nombre):
     nombre = nombre.replace(" ", "_")
     return nombre
 
+def formato_moneda(valor, simbolo=""):
+    if valor is None:
+        valor = 0
+
+    texto = f"{valor:,.2f}"
+
+    # invertir separadores
+    texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    return f"{simbolo} {texto}"
+
+def construir_resumen_correo(resumen):
+
+    blv_bs = formato_moneda(resumen.get(("BLV", "Bolívares"), 0), "Bs.")
+    blv_usd = formato_moneda(resumen.get(("BLV", "Dolares"), 0), "$")
+    crlv_usd = formato_moneda(resumen.get(("CRLV", "Dolares"), 0), "$")
+
+    texto = f"""
+Espero estén bien.
+
+Comparto relación de la semana pasada.
+
+BLV 
+Bolívares: {blv_bs}
+Dólares: {blv_usd}
+
+CRLV
+Dólares: {crlv_usd}
+
+Saludos,
+
+"""
+
+    return texto
+
 # -----------------------------
 # INTERFAZ
 # -----------------------------
+
+hoy = date.today()
+
+# lunes de esta semana
+lunes_semana_actual = hoy - timedelta(days=hoy.weekday())
+
+# lunes y viernes de la semana pasada
+lunes_anterior = lunes_semana_actual - timedelta(days=7)
+viernes_anterior = lunes_semana_actual - timedelta(days=3)
+
 col1, col2 = st.columns(2)
 with col1:
-    fecha_inicio = st.date_input("Fecha inicio", date.today() - timedelta(days=7), format="DD/MM/YYYY")
+    fecha_inicio = st.date_input(
+    "Fecha inicio",
+    value=lunes_anterior,
+    format="DD/MM/YYYY"
+)
 with col2:
-    fecha_fin = st.date_input("Fecha fin", date.today() - timedelta(days=3), format="DD/MM/YYYY")
-
+    fecha_fin = st.date_input(
+    "Fecha fin",
+    value=viernes_anterior,
+    format="DD/MM/YYYY"
+)
 # -----------------------------
 # Inicializar session_state
 # -----------------------------
@@ -258,10 +366,11 @@ if st.button("🔍 Consultar Facturas"):
             excel_bytesio = io.BytesIO()
             excel_bytesio.write(generar_excel_formateado(st.session_state.df_final))
             excel_bytesio.seek(0)
+
             st.session_state.excel_file = excel_bytesio
+
             nombre_archivo = f"Relación Farmago del {fecha_inicio.strftime('%d-%m-%Y')} al {fecha_fin.strftime('%d-%m-%Y')}.xlsx"
             st.session_state.nombre_archivo = limpiar_nombre(nombre_archivo)
-
     except Exception as e:
         st.error(f"Ocurrió un error: {str(e)}")
 
@@ -274,14 +383,9 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
 
     st.success(f"Se encontraron {len(df_final)} registros.")
     
-    st.subheader("📄 Previsualización")
-    st.dataframe(df_final, width="stretch")
+    # st.subheader("📄 Previsualización")
+    # st.dataframe(df_final, width="stretch")
 
-    st.subheader("📈 Resumen")
-    colA, colB, colC = st.columns(3)
-    colA.metric("Total Facturas", len(df_final))
-    colB.metric("Total Impuesto", round(df_final["Impuesto"].sum(), 2))
-    colC.metric("Total General", round(df_final["Total"].sum(), 2))
 
     # -----------------------------
     # FILTROS EXCLUSIONES ND
@@ -293,7 +397,7 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
 
     with colB:
         exclusiones_input = st.text_input(
-            "Excluir ND específicas (Nro. Factura, separadas por coma)",
+            "Excluir ND específicas (Nro. Nota, separadas por coma)",
             value="",
             disabled=excluir_nd
         )
@@ -330,6 +434,40 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
     #                 df_filtrado["Número"].astype(str).apply(lambda x: any(frase.lower() in x.lower() for frase in frases_nd_list))
     #     df_filtrado = df_filtrado[~mask_frases]
 
+    st.subheader("📈 Resumen por Empresa y Moneda")
+
+    resumen = calcular_resumen(df_filtrado)
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "BLV - Bolívares",
+        formato_moneda(resumen.get(("BLV", "Bolívares"), 0), "Bs.")
+    )
+
+    col2.metric(
+        "BLV - Dólares",
+        formato_moneda(resumen.get(("BLV", "Dolares"), 0), "$")
+    )
+
+    col3.metric(
+        "CRLV - Dólares",
+        formato_moneda(resumen.get(("CRLV", "Dolares"), 0), "$")
+    )
+
+    resumen_correo = construir_resumen_correo(resumen)
+
+    to = "mramos.farmago@gmail.com;staddeo@drogueriablv.com"
+    cc = "vromero@drogueriablv.com"
+
+    asunto = st.session_state.nombre_archivo.replace("_"," ")
+    asunto = urllib.parse.quote(asunto)
+    mensaje = urllib.parse.quote(resumen_correo)
+
+    mailto_link = f"mailto:{to}?cc={cc}&subject={asunto}&body={mensaje}"
+
+
+
     # -----------------------------
     # Generar Excel
     # -----------------------------
@@ -344,4 +482,9 @@ if st.session_state.df_final is not None and not st.session_state.df_final.empty
         file_name=st.session_state.nombre_archivo,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_excel"
+    )
+    
+    st.link_button(
+    "📧 Crear correo con resumen",
+    mailto_link
     )
