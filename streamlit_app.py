@@ -226,7 +226,7 @@ lunes_semana_actual = hoy - timedelta(days=hoy.weekday())
 
 # lunes y viernes de la semana pasada
 lunes_anterior = lunes_semana_actual - timedelta(days=7)
-viernes_anterior = lunes_semana_actual - timedelta(days=3)
+domingo_anterior = lunes_semana_actual - timedelta(days=1)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -238,7 +238,7 @@ with col1:
 with col2:
     fecha_fin = st.date_input(
     "Fecha fin",
-    value=viernes_anterior,
+    value=domingo_anterior,
     format="DD/MM/YYYY"
 )
 # -----------------------------
