@@ -62,7 +62,7 @@ def procesar_facturas(data):
     df["Exento"] = df["iva_exempt"].fillna(0)
     df["Total"] = df["Exento"] + df["Total Gravado"] + (df["Impuesto"] * 0.25)
 
-    mask_rnc = df["name"].str.contains("RNCVTA", case=False, na=False)
+    mask_rnc = df["name"].str.contains("RNC", case=False, na=False)
     df.loc[mask_rnc, "Exento"] = -df.loc[mask_rnc, "Exento"]
     df.loc[mask_rnc, "Total Gravado"] = -df.loc[mask_rnc, "Total Gravado"]
     df.loc[mask_rnc, "Impuesto"] = -df.loc[mask_rnc, "Impuesto"]
@@ -84,9 +84,6 @@ def procesar_facturas(data):
     return df_final
 
 def calcular_resumen(df):
-
-    
-
     resumen = (
         df.groupby(["Empresa", "Moneda"])["Total"]
         .sum()
@@ -95,12 +92,10 @@ def calcular_resumen(df):
     )
 
     resumen_dict = {}
-
     for _, row in resumen.iterrows():
         empresa = row["Empresa"]
         moneda = row["Moneda"]
         total = row["Total"]
-
         resumen_dict[(empresa, moneda)] = total
 
     return resumen_dict
@@ -138,31 +133,15 @@ def generar_excel_formateado(df):
             worksheet.write(row_num, 9, df.iloc[row_num-1, 9])
 
         for i, col in enumerate(df.columns):
-
-            # convertir todo a string evitando NaN
             column_data = df[col].astype(str).fillna("")
-
-            # calcular longitud máxima entre header y valores
-            max_len = max(
-                column_data.map(len).max(),
-                len(str(col))
-            )
-
-            # pequeño padding visual
+            max_len = max(column_data.map(len).max(), len(str(col)))
             adjusted_width = max_len + 3
-
             worksheet.set_column(i, i, adjusted_width)
 
-        # -----------------------------
-        # RESUMEN EN EXCEL
-        # -----------------------------
-
         bold_format = workbook.add_format({"bold": True})
-
         worksheet.write("L1", "BLV", bold_format)
         worksheet.write("L2", "Bolívares")
         worksheet.write("L3", "Dolares")
-
         worksheet.write("L4", "CRLV", bold_format)
         worksheet.write("L5", "Dolares")
 
@@ -183,16 +162,11 @@ def limpiar_nombre(nombre):
 def formato_moneda(valor, simbolo=""):
     if valor is None:
         valor = 0
-
     texto = f"{valor:,.2f}"
-
-    # invertir separadores
     texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
-
     return f"{simbolo} {texto}"
 
 def construir_resumen_correo(resumen):
-
     blv_bs = formato_moneda(resumen.get(("BLV", "Bolívares"), 0), "Bs.")
     blv_usd = formato_moneda(resumen.get(("BLV", "Dolares"), 0), "$")
     crlv_usd = formato_moneda(resumen.get(("CRLV", "Dolares"), 0), "$")
@@ -210,44 +184,25 @@ CRLV
 Dólares: {crlv_usd}
 
 Saludos,
-
 """
-
     return texto
 
 # -----------------------------
 # INTERFAZ
 # -----------------------------
-
 hoy = date.today()
-
-# lunes de esta semana
 lunes_semana_actual = hoy - timedelta(days=hoy.weekday())
-
-# lunes y viernes de la semana pasada
 lunes_anterior = lunes_semana_actual - timedelta(days=7)
 domingo_anterior = lunes_semana_actual - timedelta(days=1)
 
 col1, col2 = st.columns(2)
 with col1:
-    fecha_inicio = st.date_input(
-    "Fecha inicio",
-    value=lunes_anterior,
-    format="DD/MM/YYYY"
-)
+    fecha_inicio = st.date_input("Fecha inicio", value=lunes_anterior, format="DD/MM/YYYY")
 with col2:
-    fecha_fin = st.date_input(
-    "Fecha fin",
-    value=domingo_anterior,
-    format="DD/MM/YYYY"
-)
-# -----------------------------
-# Inicializar session_state
-# -----------------------------
+    fecha_fin = st.date_input("Fecha fin", value=domingo_anterior, format="DD/MM/YYYY")
+
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
-if "excel_file" not in st.session_state:
-    st.session_state.excel_file = None
 if "nombre_archivo" not in st.session_state:
     st.session_state.nombre_archivo = None
 
@@ -256,6 +211,7 @@ if "nombre_archivo" not in st.session_state:
 # -----------------------------
 if st.button("🔍 Consultar Facturas"):
     try:
+        # CONEXIÓN BD1
         config = st.secrets["odoo_bd1"]
         client = OdooClient(config["url"], config["db"], config["username"], config["password"])
 
@@ -264,7 +220,8 @@ if st.button("🔍 Consultar Facturas"):
             ('invoice_partner_display_name', '=', 'FARMACIA FARMAGO, C.A.'),
             ('invoice_date', '>=', str(fecha_inicio)),
             ('invoice_date', '<=', str(fecha_fin)),
-            ('state', '=', 'posted')
+            ('state', '=', 'posted'),
+            ('payment_state', '!=','reversed')
         ]
 
         fields = [
@@ -272,60 +229,38 @@ if st.button("🔍 Consultar Facturas"):
             'iva_exempt','amount_tax_usd','amount_tax_bs','currency_id','amount_total'
         ]
 
-        with st.spinner("Consultando Odoo..."):
+        with st.spinner("Consultando Odoo BD1..."):
             data = client.search_read('account.move', domain, fields)
+            st.session_state.df_final = procesar_facturas(data)
 
-        # -----------------------------
         # CONEXIÓN BD2
-        # -----------------------------
         config2 = st.secrets["odoo_bd2"]
         client2 = OdooClient(config2["url"], config2["db"], config2["username"], config2["password"])
 
-        domain_bd2 = [
-            ('move_type', 'in', ['out_invoice', 'out_refund']),
-            ('invoice_partner_display_name', '=', 'FARMACIA FARMAGO, C.A.'),
-            ('invoice_date', '>=', str(fecha_inicio)),
-            ('invoice_date', '<=', str(fecha_fin)),
-            ('state', '=', 'posted')
-        ]
-
         fields_bd2 = [
-            'name',
-            'invoice_date',
-            'invoice_number_next',
-            'partner_id',
-            'amount_exento',
-            'amount_untaxed_signed',
-            'amount_tax_signed',
-            'amount_total_signed',
-            'currency_id',
-            'tasa'
+            'name', 'invoice_date', 'invoice_number_next', 'partner_id',
+            'amount_tax', 'subtotal_discount_rate', 'total_discount_rate', 
+            'currency_id', 'rate'
         ]
 
-        data_bd2 = client2.search_read('account.move', domain_bd2, fields_bd2)
+        with st.spinner("Consultando Odoo BD2..."):
+            data_bd2 = client2.search_read('account.move', domain, fields_bd2)
 
-
-
-        st.session_state.df_final = procesar_facturas(data)
-
-        # -----------------------------
-        # PROCESAR BD2
-        # -----------------------------
         if data_bd2:
             df_bd2 = pd.DataFrame(data_bd2)
+            tasa = df_bd2["rate"].replace(0, 1) if "rate" in df_bd2.columns else 1
 
-            df_bd2["Moneda"] = df_bd2["currency_id"].apply(lambda x: x[1] if x else "")
-
-            # Usar el campo 'tasa' si existe, si no asumimos 1
-            if "tasa" in df_bd2.columns:
-                tasa = df_bd2["tasa"].replace(0, 1)  # evitar dividir entre 0
-            else:
-                tasa = pd.Series([1]*len(df_bd2))
-
-            exento = df_bd2["amount_exento"] / tasa
-            total_gravado = df_bd2["amount_untaxed_signed"] / tasa
-            impuesto = df_bd2["amount_tax_signed"] / tasa
-            total_calculado = exento + total_gravado + (impuesto * 0.25)
+            gravado_abs = (df_bd2["subtotal_discount_rate"] - df_bd2["total_discount_rate"]).abs()
+            impuesto_abs = (df_bd2["amount_tax"] / tasa).abs()
+            subtotal_abs = df_bd2["subtotal_discount_rate"].abs()
+            
+            # LÍNEA RESTAURADA
+            exento_abs = (subtotal_abs - gravado_abs - impuesto_abs).clip(lower=0)
+            
+            is_nc = df_bd2["name"].str.contains("NC", case=False, na=False)
+            total_abs = pd.Series(0.0, index=df_bd2.index)
+            total_abs[~is_nc] = exento_abs[~is_nc] + gravado_abs[~is_nc] + (impuesto_abs[~is_nc] * 0.25)
+            total_abs[is_nc] = exento_abs[is_nc] + gravado_abs[is_nc] + impuesto_abs[is_nc]
 
             df_bd2_final = pd.DataFrame({
                 "Empresa": "CRLV",
@@ -333,158 +268,79 @@ if st.button("🔍 Consultar Facturas"):
                 "Fecha": df_bd2["invoice_date"],
                 "Nro. Factura": df_bd2["invoice_number_next"],
                 "Cliente": df_bd2["partner_id"].apply(lambda x: x[1] if x else ""),
-                "Exento": exento,
-                "Total Gravado": total_gravado,
-                "Impuesto": impuesto,
-                "Total": total_calculado,
+                "Exento": exento_abs,
+                "Total Gravado": gravado_abs,
+                "Impuesto": impuesto_abs,
+                "Total": total_abs,
                 "Moneda": "Dolares"
             })
 
-            # -----------------------------
-            # Ajuste especial para NC (usar amount_total_signed)
-            # -----------------------------
-            mask_nc = df_bd2["name"].str.contains("NC", case=False, na=False)
+            cols_calc = ["Exento", "Total Gravado", "Impuesto", "Total"]
+            df_bd2_final.loc[is_nc, cols_calc] *= -1
+            df_bd2_final[cols_calc] = df_bd2_final[cols_calc].round(2)
 
-            df_bd2_final.loc[mask_nc, "Total"] = df_bd2.loc[mask_nc, "amount_total_signed"] / tasa[mask_nc]
-
-            # -----------------------------
-            # Redondear valores a 2 decimales
-            # -----------------------------
-            df_bd2_final[["Exento", "Total Gravado", "Impuesto", "Total"]] = \
-            df_bd2_final[["Exento", "Total Gravado", "Impuesto", "Total"]].round(2)
-
-            # Concatenar con BD1
-            st.session_state.df_final = pd.concat(
-                [st.session_state.df_final, df_bd2_final],
-                ignore_index=True
-            )
-
-
-
+            st.session_state.df_final = pd.concat([st.session_state.df_final, df_bd2_final], ignore_index=True)
 
         if not st.session_state.df_final.empty:
-            excel_bytesio = io.BytesIO()
-            excel_bytesio.write(generar_excel_formateado(st.session_state.df_final))
-            excel_bytesio.seek(0)
-
-            st.session_state.excel_file = excel_bytesio
-
             nombre_archivo = f"Relación Farmago del {fecha_inicio.strftime('%d-%m-%Y')} al {fecha_fin.strftime('%d-%m-%Y')}.xlsx"
             st.session_state.nombre_archivo = limpiar_nombre(nombre_archivo)
+            
     except Exception as e:
         st.error(f"Ocurrió un error: {str(e)}")
 
 # -----------------------------
-# Mostrar resultados y descarga
+# Mostrar resultados y filtros
 # -----------------------------
 if st.session_state.df_final is not None and not st.session_state.df_final.empty:
-    # Aseguramos df_final
-    df_final = st.session_state.df_final
+    st.divider()
+    col_blv, col_crlv = st.columns(2)
 
-    st.success(f"Se encontraron {len(df_final)} registros.")
-    
-    # st.subheader("📄 Previsualización")
-    # st.dataframe(df_final, width="stretch")
+    with col_blv:
+        st.subheader("🏢 BLV")
+        blv_nd_all = st.checkbox("Excluir todas las ND (BLV)", key="blv_nd_all")
+        blv_nd_txt = st.text_input("ND específicas (BLV - sep por coma)", key="blv_nd_txt", disabled=blv_nd_all)
+        blv_nc_all = st.checkbox("Excluir todas las NC (BLV)", key="blv_nc_all")
+        blv_nc_txt = st.text_input("NC específicas (BLV - sep por coma)", key="blv_nc_txt", disabled=blv_nc_all)
 
+    with col_crlv:
+        st.subheader("🏢 CRLV")
+        crlv_nd_all = st.checkbox("Excluir todas las ND (CRLV)", key="crlv_nd_all")
+        crlv_nd_txt = st.text_input("ND específicas (CRLV - sep por coma)", key="crlv_nd_txt", disabled=crlv_nd_all)
+        crlv_nc_all = st.checkbox("Excluir todas las NC (CRLV)", key="crlv_nc_all")
+        crlv_nc_txt = st.text_input("NC específicas (CRLV - sep por coma)", key="crlv_nc_txt", disabled=crlv_nc_all)
 
-    # -----------------------------
-    # FILTROS EXCLUSIONES ND
-    # -----------------------------
-    colA, colB, colC = st.columns(3)
+    df_filtrado = st.session_state.df_final.copy()
 
-    with colA:
-        excluir_nd = st.checkbox("Excluir todas las ND?", value=False)
+    def filtrar(df, emp, nd_all, nd_txt, nc_all, nc_txt):
+        mask_emp = df["Empresa"] == emp
+        # ND
+        if nd_all:
+            df = df[~(mask_emp & df["Número"].str.contains("ND", case=False, na=False))]
+        elif nd_txt:
+            items = [x.strip() for x in nd_txt.split(",") if x.strip()]
+            mask = mask_emp & df["Número"].str.contains("ND", case=False, na=False) & df["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in items))
+            df = df[~mask]
+        # NC
+        if nc_all:
+            df = df[~(mask_emp & df["Número"].str.contains("NC|RNC", case=False, na=False))]
+        elif nc_txt:
+            items = [x.strip() for x in nc_txt.split(",") if x.strip()]
+            mask = mask_emp & df["Número"].str.contains("NC|RNC", case=False, na=False) & df["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in items))
+            df = df[~mask]
+        return df
 
-    with colB:
-        exclusiones_input = st.text_input(
-            "Excluir ND específicas (Nro. Nota, separadas por coma)",
-            value="",
-            disabled=excluir_nd
-        )
+    df_filtrado = filtrar(df_filtrado, "BLV", blv_nd_all, blv_nd_txt, blv_nc_all, blv_nc_txt)
+    df_filtrado = filtrar(df_filtrado, "CRLV", crlv_nd_all, crlv_nd_txt, crlv_nc_all, crlv_nc_txt)
 
-    # with colC:
-    #     frases_nd_input = st.text_input(
-    #         "Excluir ND por frases (separadas por coma)",
-    #         value="",
-    #         disabled=excluir_nd or bool(exclusiones_input)
-    #     )
-
-    # -----------------------------
-    # Convertir inputs a listas
-    # -----------------------------
-    exclusiones_list = [x.strip() for x in exclusiones_input.split(",") if x.strip()]
-    # frases_nd_list = [x.strip() for x in frases_nd_input.split(",") if x.strip()]
-
-    # -----------------------------
-    # Aplicar filtros
-    # -----------------------------
-    df_filtrado = df_final.copy()
-
-    if excluir_nd:
-        # Excluir todas las filas cuyo 'name' contiene 'ND'
-        df_filtrado = df_filtrado[~df_filtrado["Número"].str.contains("ND", case=False, na=False)]
-    elif exclusiones_list:
-        # Excluir filas donde 'name' contiene 'ND' y 'Nro. Factura' contiene alguno de los valores
-        mask_excluir = df_filtrado["Número"].str.contains("ND", case=False, na=False) & \
-                    df_filtrado["Nro. Factura"].astype(str).apply(lambda x: any(e in x for e in exclusiones_list))
-        df_filtrado = df_filtrado[~mask_excluir]
-    # elif frases_nd_list:
-    #     # Excluir filas donde 'name' contiene 'ND' y además contiene alguna de las frases
-    #     mask_frases = df_filtrado["Número"].str.contains("ND", case=False, na=False) & \
-    #                 df_filtrado["Número"].astype(str).apply(lambda x: any(frase.lower() in x.lower() for frase in frases_nd_list))
-    #     df_filtrado = df_filtrado[~mask_frases]
-
-    st.subheader("📈 Resumen por Empresa y Moneda")
-
+    st.subheader("📈 Resumen")
     resumen = calcular_resumen(df_filtrado)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("BLV - Bolívares", formato_moneda(resumen.get(("BLV", "Bolívares"), 0), "Bs."))
+    c2.metric("BLV - Dólares", formato_moneda(resumen.get(("BLV", "Dolares"), 0), "$"))
+    c3.metric("CRLV - Dólares", formato_moneda(resumen.get(("CRLV", "Dolares"), 0), "$"))
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "BLV - Bolívares",
-        formato_moneda(resumen.get(("BLV", "Bolívares"), 0), "Bs.")
-    )
-
-    col2.metric(
-        "BLV - Dólares",
-        formato_moneda(resumen.get(("BLV", "Dolares"), 0), "$")
-    )
-
-    col3.metric(
-        "CRLV - Dólares",
-        formato_moneda(resumen.get(("CRLV", "Dolares"), 0), "$")
-    )
-
-    resumen_correo = construir_resumen_correo(resumen)
-
-    to = "mramos.farmago@gmail.com;staddeo@drogueriablv.com"
-    cc = "vromero@drogueriablv.com"
-
-    asunto = st.session_state.nombre_archivo.replace("_"," ")
-    asunto = urllib.parse.quote(asunto)
-    mensaje = urllib.parse.quote(resumen_correo)
-
-    mailto_link = f"mailto:{to}?cc={cc}&subject={asunto}&body={mensaje}"
-
-
-
-    # -----------------------------
-    # Generar Excel
-    # -----------------------------
-    excel_bytesio = io.BytesIO()
-    excel_bytesio.write(generar_excel_formateado(df_filtrado))
-    excel_bytesio.seek(0)
-    st.session_state.excel_file = excel_bytesio
-
-    st.download_button(
-        label="⬇️ Descargar Excel",
-        data=st.session_state.excel_file,
-        file_name=st.session_state.nombre_archivo,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="download_excel"
-    )
+    st.download_button(label="⬇️ Descargar Excel", data=generar_excel_formateado(df_filtrado), file_name=st.session_state.nombre_archivo)
     
-    st.link_button(
-    "📧 Crear correo con resumen",
-    mailto_link
-    )
+    mensaje = urllib.parse.quote(construir_resumen_correo(resumen))
+    mailto = f"mailto:mramos.farmago@gmail.com;staddeo@drogueriablv.com?cc=vromero@drogueriablv.com&subject={urllib.parse.quote(st.session_state.nombre_archivo.replace('_',' '))}&body={mensaje}"
+    st.link_button("📧 Crear correo", mailto)
