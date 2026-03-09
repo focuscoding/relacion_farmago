@@ -255,7 +255,7 @@ if st.button("🔍 Consultar Facturas"):
             subtotal_abs = df_bd2["subtotal_discount_rate"].abs()
             
             # LÍNEA RESTAURADA
-            exento_abs = (subtotal_abs - gravado_abs - impuesto_abs).clip(lower=0)
+            exento_abs = (subtotal_abs - gravado_abs - impuesto_abs - df_bd2["total_discount_rate"]).clip(lower=0)
             
             is_nc = df_bd2["name"].str.contains("NC", case=False, na=False)
             total_abs = pd.Series(0.0, index=df_bd2.index)
