@@ -221,7 +221,9 @@ if st.button("🔍 Consultar Facturas"):
             ('invoice_date', '>=', str(fecha_inicio)),
             ('invoice_date', '<=', str(fecha_fin)),
             ('state', '=', 'posted'),
-            ('payment_state', '!=','reversed')
+            ('payment_state', '!=','reversed'),
+            ('payment_state', '!=','paid')
+            
         ]
 
         fields = [
